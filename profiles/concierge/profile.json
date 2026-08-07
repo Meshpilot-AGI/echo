@@ -1,0 +1,73 @@
+{
+  "id": "concierge",
+  "name": "Concierge — multi-purpose international voice agent (US/EN via Twilio)",
+  "description": "A general-purpose, multi-talented English voice agent for international (US/+1) calls over Twilio. The call's PURPOSE is supplied per-dispatch (payload.goal + context), so the same agent can confirm deliveries, follow up on carts, qualify leads, handle post-purchase support, etc. India COD stays on the cod-confirm profile/Vobiz; this is the prepaid-international counterpart.",
+  "languages": [
+    "en-US"
+  ],
+  "defaultLanguage": "en-US",
+  "voice": {
+    "primary": {
+      "provider": "elevenlabs",
+      "model": "eleven_flash_v2_5",
+      "encoding": "pcm_8000",
+      "voiceIdEnv": "ELEVENLABS_VOICE_ID_INTL"
+    }
+  },
+  "stt": {
+    "provider": "elevenlabs",
+    "model": "scribe"
+  },
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "maxTokens": 90
+  },
+  "promptTemplate": {
+    "en-US": "profiles/concierge/prompts/en-US-prompt.txt"
+  },
+  "promptPlaceholders": [
+    "agent_name",
+    "brand_name",
+    "customer_name",
+    "goal",
+    "context_block"
+  ],
+  "tools": [
+    {
+      "name": "complete_call",
+      "description": "Goal achieved or the conversation reached its natural end — record the outcome + a short summary.",
+      "terminal": true
+    },
+    {
+      "name": "request_callback",
+      "description": "Customer asked to be called back at a specific time.",
+      "terminal": true
+    },
+    {
+      "name": "escalate_human",
+      "description": "Customer needs a human / situation is out of scope — record for manual follow-up.",
+      "terminal": true
+    }
+  ],
+  "triggers": [
+    {
+      "type": "http_dispatch",
+      "path": "/calls/dispatch",
+      "purpose": "Generic dispatch — POST a concierge call with a per-call goal + context."
+    }
+  ],
+  "session": {
+    "autoHangupMs": 10000,
+    "minInterruptionWords": 3,
+    "minInterruptionDurationMs": 750,
+    "aecWarmupMs": 500,
+    "welcomeInterruptible": false,
+    "noiseCancellation": true
+  },
+  "recording": {
+    "backend": "r2",
+    "consentDisclosure": true,
+    "egressDelayMs": 10000
+  }
+}

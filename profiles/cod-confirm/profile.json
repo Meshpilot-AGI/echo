@@ -1,0 +1,175 @@
+{
+  "id": "cod-confirm",
+  "name": "Priya — Shopify COD Order Confirmation",
+  "description": "Calls Indian COD customers ~10 minutes after order placement to confirm before dispatch. Cuts RTO rates by catching cancellations, wrong addresses, and fake orders.",
+  "languages": ["hi-IN", "en-IN"],
+  "defaultLanguage": "hi-IN",
+
+  "voice": {
+    "primary": {
+      "provider": "elevenlabs",
+      "model": "eleven_turbo_v2_5",
+      "encoding": "pcm_8000",
+      "voiceIdEnv": "ELEVENLABS_VOICE_ID"
+    },
+    "fallback": {
+      "provider": "sarvam",
+      "model": "bulbul:v3",
+      "speaker": "neha",
+      "sampleRate": 8000
+    }
+  },
+
+  "stt": {
+    "provider": "sarvam",
+    "model": "saaras:v3"
+  },
+
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "maxTokens": 60
+  },
+
+  "promptTemplate": {
+    "hi-IN": "profiles/cod-confirm/prompts/hindi-prompt.txt",
+    "en-IN": "profiles/cod-confirm/prompts/english-prompt.txt"
+  },
+  "promptFallback": {
+    "hi-IN": "profiles/cod-confirm/prompts/hindi-prompt.example.txt",
+    "en-IN": "profiles/cod-confirm/prompts/english-prompt.example.txt"
+  },
+  "promptPlaceholders": [
+    "store_name",
+    "store_category",
+    "customer_name",
+    "product",
+    "amount_words",
+    "amount_digits",
+    "address_line",
+    "order_id"
+  ],
+
+  "tools": [
+    {
+      "name": "confirm_order",
+      "description": "Customer confirmed the order — write cod-confirmed tag to Shopify.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/confirm_order",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "cancel_order",
+      "description": "Customer wants to cancel — requires a reason and an explicit yes/no re-confirmation before firing.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string", "description": "Customer-stated cancel reason" }
+        },
+        "required": ["reason"]
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/cancel_order",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "request_human_agent",
+      "description": "Customer needs a human — log details and tag for manual follow-up.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string" }
+        },
+        "required": ["reason"]
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/request_human_agent",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "request_callback",
+      "description": "Customer wants a callback at a specific time — log it for the scheduler.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "preferredTime": { "type": "string", "description": "Free-form customer-stated time, e.g. 'kal subah 10 baje'" }
+        },
+        "required": ["preferredTime"]
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/request_callback",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    }
+  ],
+
+  "triggers": [
+    {
+      "type": "shopify_webhook",
+      "topic": "orders/create",
+      "path": "/webhook/shopify/orders-create",
+      "filter": {
+        "paymentMethod": ["cod", "Cash on Delivery"],
+        "maxAgeHours": 6
+      },
+      "delayMs": 600000,
+      "config": {
+        "allowlistEnv": "ALLOWED_SHOPS",
+        "secretsEnv": "SHOPIFY_WEBHOOK_SECRETS",
+        "fallbackSecretEnv": "SHOPIFY_WEBHOOK_SECRET",
+        "brandingEnv": "STORE_BRANDING"
+      }
+    },
+    {
+      "type": "http_dispatch",
+      "path": "/flow-test-livekit",
+      "auth": "none",
+      "purpose": "dev: trigger a real PSTN call against an existing Shopify order, bypasses DND"
+    }
+  ],
+
+  "session": {
+    "autoHangupMs": 10000,
+    "minInterruptionWords": 3,
+    "minInterruptionDurationMs": 600,
+    "aecWarmupMs": 500,
+    "welcomeInterruptible": false,
+    "dnd": {
+      "startHourIST": 20,
+      "endHourIST": 10
+    }
+  },
+
+  "outcomes": {
+    "confirm_order": { "shopifyTag": "cod-confirmed" },
+    "cancel_order": { "shopifyTag": "cod-cancelled" },
+    "request_human_agent": { "shopifyTag": "cod-agent-needed" },
+    "request_callback": { "shopifyTag": "cod-callback-requested" }
+  },
+
+  "recording": {
+    "backend": "r2",
+    "consentDisclosure": true,
+    "egressDelayMs": 10000
+  }
+}

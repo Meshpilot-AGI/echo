@@ -1,0 +1,26 @@
+[Unit]
+Description=Mesh Pilot COD Confirm \u2014 voice AI COD confirmation service
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=support
+WorkingDirectory=/home/ubuntu/glitch-grow-ads-agent-private/agents/cod_confirm
+EnvironmentFile=/home/ubuntu/glitch-grow-ads-agent-private/.env
+Environment=PATH=/home/ubuntu/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ubuntu/.npm-global/bin/pnpm start
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cod-confirm
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/glitch-grow-ads-agent-private
+
+[Install]
+WantedBy=multi-user.target

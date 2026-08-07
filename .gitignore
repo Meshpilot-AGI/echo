@@ -1,0 +1,28 @@
+# Environments / secrets
+.env
+.env.*
+!.env.example
+*.pem
+service-account*.json
+google-credentials*.json
+.env.backup-*
+
+# Node
+node_modules/
+.pnpm-debug.log
+npm-debug.log
+.DS_Store
+
+# Editor / OS
+.idea/
+.vscode/
+
+# Claude / agent state
+.claude/worktrees/
+
+# Test/build artefacts
+dist/
+coverage/
+
+# Prisma migrations should be committed; client cache should not
+node_modules/.prisma

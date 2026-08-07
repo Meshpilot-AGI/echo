@@ -1,0 +1,73 @@
+{
+  "_comment": "Urban brand family — COD confirmation voice-agent configuration. Add shop secrets to SHOPIFY_WEBHOOK_SECRETS env var; this file provides the allowlist + branding fallback.",
+  "stores": [
+    {
+      "domain": "f51039.myshopify.com",
+      "brand_id": "urban-classics",
+      "display_name": "Urban Classics",
+      "category": "online store",
+      "checkout_provider": "flexype",
+      "meta_account_id": "act_1909845012991177",
+      "phone_country": "IN",
+      "active": true,
+      "call_window": {
+        "timezone": "Asia/Kolkata",
+        "dnd_start_hour": 20,
+        "dnd_end_hour": 10,
+        "calls_enabled": true
+      },
+      "app_slug": "urban"
+    },
+    {
+      "domain": "ys4n0u-ys.myshopify.com",
+      "brand_id": "storico",
+      "display_name": "Storico",
+      "category": "online store",
+      "checkout_provider": "shiprocket_fastrr",
+      "meta_account_id": "act_755235000581939",
+      "phone_country": "IN",
+      "active": true,
+      "call_window": {
+        "timezone": "Asia/Kolkata",
+        "dnd_start_hour": 20,
+        "dnd_end_hour": 10,
+        "calls_enabled": true
+      },
+      "app_slug": "storico"
+    },
+    {
+      "domain": "52j1ga-hz.myshopify.com",
+      "brand_id": "classicoo",
+      "display_name": "Classicoo",
+      "category": "online store",
+      "checkout_provider": "shiprocket_fastrr",
+      "meta_account_id": "act_1231977889107681",
+      "phone_country": "IN",
+      "active": true,
+      "call_window": {
+        "timezone": "Asia/Kolkata",
+        "dnd_start_hour": 20,
+        "dnd_end_hour": 10,
+        "calls_enabled": true
+      },
+      "app_slug": "classicoo"
+    },
+    {
+      "domain": "acmsuy-g0.myshopify.com",
+      "brand_id": "trendsetters",
+      "display_name": "Trendsetters",
+      "category": "online store",
+      "checkout_provider": "flexype",
+      "meta_account_id": "act_1445770643706149",
+      "phone_country": "IN",
+      "active": true,
+      "call_window": {
+        "timezone": "Asia/Kolkata",
+        "dnd_start_hour": 20,
+        "dnd_end_hour": 10,
+        "calls_enabled": true
+      },
+      "app_slug": "trendsetters"
+    }
+  ]
+}

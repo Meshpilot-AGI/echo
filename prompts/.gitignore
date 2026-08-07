@@ -1,0 +1,18 @@
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+.DS_Store
+
+# Tuned prompts are proprietary — committed only to the private repo
+# (glitch-cod-confirm-private). The *.example.txt files stay committed here
+# as a generic demo so the engine is runnable out-of-the-box.
+# See prompts/README.md.
+#
+# The `prompts/` dir is ALSO the working tree of the private repo, mounted
+# via a nested .git/ directory. Its .gitignore is owned by the private repo
+# and must not be tracked here.
+prompts/hindi-prompt.txt
+prompts/english-prompt.txt
+prompts/.gitignore

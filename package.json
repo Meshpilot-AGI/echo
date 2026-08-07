@@ -1,0 +1,52 @@
+{
+  "name": "mesh-pilot-voice",
+  "version": "0.1.0",
+  "description": "Voice AI COD order confirmation for Indian Shopify stores",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/brain.test.js",
+    "retell:capture": "node src/retell-capture-config.mjs",
+    "retell:apply": "node src/retell-apply-config.mjs",
+    "retell:eval:seed": "node src/retell-eval-seed.mjs",
+    "retell:eval:run": "node src/retell-eval-run.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1063.0",
+    "@livekit/agents": "^1.4.5",
+    "@livekit/agents-plugin-elevenlabs": "1.4.5",
+    "@livekit/agents-plugin-google": "1.4.5",
+    "@livekit/agents-plugin-livekit": "^1.4.5",
+    "@livekit/agents-plugin-openai": "^1.4.5",
+    "@livekit/agents-plugin-sarvam": "^1.4.5",
+    "@livekit/agents-plugin-silero": "^1.4.5",
+    "@livekit/noise-cancellation-node": "^0.1.9",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@prisma/client": "^6",
+    "express": "^4.21.2",
+    "livekit-server-sdk": "^2.15.1",
+    "node-fetch": "^3.3.2",
+    "openai": "^6.42.0",
+    "pg": "^8.21.0",
+    "retell-sdk": "^5.36.0",
+    "twilio": "^6.0.2",
+    "ws": "^8.21.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@ffmpeg-installer/linux-x64",
+      "onnxruntime-node",
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "protobufjs",
+      "sharp"
+    ]
+  }
+}

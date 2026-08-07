@@ -1,0 +1,131 @@
+{
+  "agent_name": "COD Confirm — Urban Classics (Priya — Conversation Flow)",
+  "response_engine": {
+    "type": "conversation-flow",
+    "version": 1,
+    "conversation_flow_id": "conversation_flow_2d02bf9e4676"
+  },
+  "voice_id": "custom_voice_0165f6d2118d656fd47d592acb",
+  "voice_model": "eleven_multilingual_v2",
+  "voice_temperature": 0.3,
+  "voice_speed": 0.92,
+  "enable_dynamic_voice_speed": false,
+  "volume": 1,
+  "enable_backchannel": true,
+  "backchannel_frequency": 0.2,
+  "backchannel_words": [
+    "haan",
+    "hmm",
+    "achha",
+    "ji"
+  ],
+  "responsiveness": 0.85,
+  "enable_dynamic_responsiveness": false,
+  "interruption_sensitivity": 0.4,
+  "normalize_for_speech": true,
+  "boosted_keywords": [
+    "Urban Classics",
+    "Priya",
+    "COD",
+    "Hinglish",
+    "Namaste",
+    "Dhanyawaad",
+    "Urban",
+    "Classics"
+  ],
+  "pronunciation_dictionary": [
+    {
+      "word": "Priya",
+      "alphabet": "ipa",
+      "phoneme": "ˈpɾijaː"
+    },
+    {
+      "word": "Namaste",
+      "alphabet": "ipa",
+      "phoneme": "nəməsteː"
+    },
+    {
+      "word": "Dhanyawaad",
+      "alphabet": "ipa",
+      "phoneme": "d̪ʱənjəʋaːd̪"
+    },
+    {
+      "word": "bilkul",
+      "alphabet": "ipa",
+      "phoneme": "bɪlkʊl"
+    },
+    {
+      "word": "achha",
+      "alphabet": "ipa",
+      "phoneme": "ətʃʰaː"
+    },
+    {
+      "word": "haan",
+      "alphabet": "ipa",
+      "phoneme": "ɦaːn"
+    },
+    {
+      "word": "ji",
+      "alphabet": "ipa",
+      "phoneme": "dʒiː"
+    },
+    {
+      "word": "Urban Classics",
+      "alphabet": "ipa",
+      "phoneme": "ˈɜːrbən"
+    }
+  ],
+  "language": [
+    "hi-IN",
+    "en-IN"
+  ],
+  "stt_mode": "accurate",
+  "denoising_mode": "noise-and-background-speech-cancellation",
+  "voicemail_option": {
+    "action": {
+      "type": "hangup"
+    }
+  },
+  "max_call_duration_ms": 180000,
+  "end_call_after_silence_ms": 15000,
+  "allow_user_dtmf": true,
+  "user_dtmf_options": {},
+  "webhook_url": "https://shopify.meshpilot.app/cod-confirm/webhook/retell/call-event",
+  "webhook_events": [
+    "call_started",
+    "call_ended",
+    "call_analyzed"
+  ],
+  "handbook_config": {
+    "echo_verification": false,
+    "speech_normalization": true,
+    "default_personality": false,
+    "scope_boundaries": true,
+    "natural_filler_words": true,
+    "nato_phonetic_alphabet": false,
+    "high_empathy": true,
+    "ai_disclosure": false,
+    "smart_matching": true
+  },
+  "pii_config": {
+    "mode": "post_call",
+    "categories": []
+  },
+  "post_call_analysis_data": [
+    {
+      "type": "system-presets",
+      "name": "call_summary"
+    },
+    {
+      "type": "system-presets",
+      "name": "call_successful",
+      "description": "The agent finished the COD confirmation task. The call is successful if the customer confirmed, cancelled, requested a callback, or was transferred to a human agent."
+    },
+    {
+      "type": "system-presets",
+      "name": "user_sentiment"
+    }
+  ],
+  "post_call_analysis_model": "gpt-4.1",
+  "analysis_successful_prompt": "The agent finished the COD confirmation task. The call is successful if the customer confirmed, cancelled, requested a callback, or was transferred to a human agent."
+}

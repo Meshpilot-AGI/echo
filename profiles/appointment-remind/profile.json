@@ -1,0 +1,144 @@
+{
+  "id": "appointment-remind",
+  "name": "Maya — Appointment Reminder",
+  "description": "Calls customers ~24 hours before a scheduled appointment to confirm attendance, handle rescheduling, or capture cancellations. Designed for clinics, salons, service businesses, and any vertical where no-show rates drive revenue loss.",
+  "languages": ["hi-IN", "en-IN"],
+  "defaultLanguage": "hi-IN",
+
+  "voice": {
+    "primary": {
+      "provider": "elevenlabs",
+      "model": "eleven_turbo_v2_5",
+      "encoding": "pcm_8000",
+      "voiceIdEnv": "ELEVENLABS_VOICE_ID"
+    },
+    "fallback": {
+      "provider": "sarvam",
+      "model": "bulbul:v3",
+      "speaker": "ritu",
+      "sampleRate": 8000
+    }
+  },
+
+  "stt": {
+    "provider": "sarvam",
+    "model": "saaras:v3"
+  },
+
+  "llm": {
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "maxTokens": 60
+  },
+
+  "promptTemplate": {
+    "hi-IN": "profiles/appointment-remind/prompts/hindi-prompt.txt",
+    "en-IN": "profiles/appointment-remind/prompts/english-prompt.txt"
+  },
+  "promptFallback": {
+    "hi-IN": "profiles/appointment-remind/prompts/hindi-prompt.example.txt",
+    "en-IN": "profiles/appointment-remind/prompts/english-prompt.example.txt"
+  },
+  "promptPlaceholders": [
+    "provider_name",
+    "customer_name",
+    "appointment_date",
+    "appointment_time",
+    "service_name",
+    "location"
+  ],
+
+  "tools": [
+    {
+      "name": "confirm_appointment",
+      "description": "Customer confirmed attendance — log it and end the call.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/confirm_appointment",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "reschedule_appointment",
+      "description": "Customer wants to reschedule — capture their preferred new slot.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "preferredTime": { "type": "string", "description": "Free-form new-slot preference, e.g. 'kal subah 11 baje' or 'next Wednesday afternoon'" }
+        },
+        "required": ["preferredTime"]
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/reschedule_appointment",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "cancel_appointment",
+      "description": "Customer cancelled — capture the reason if offered.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string", "description": "Customer-stated cancel reason; empty if not given." }
+        },
+        "required": []
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/cancel_appointment",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    },
+    {
+      "name": "request_human_agent",
+      "description": "Customer needs a human — log details for manual follow-up.",
+      "terminal": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": { "type": "string" }
+        },
+        "required": ["reason"]
+      },
+      "handler": {
+        "type": "http",
+        "endpoint": "/webhook/livekit/tool/request_human_agent",
+        "authHeader": "X-COD-Tool-Secret",
+        "authSecretEnv": "LIVEKIT_TOOL_SECRET"
+      }
+    }
+  ],
+
+  "triggers": [
+    {
+      "type": "http_dispatch",
+      "path": "/calls/dispatch",
+      "auth": "tool_secret",
+      "purpose": "External system (calendar integration, CRM, internal scheduler) POSTs to enqueue an appointment-reminder call. Payload shape: { provider_name, customer_name, appointment_date, appointment_time, service_name, location, appointment_id }."
+    }
+  ],
+
+  "session": {
+    "autoHangupMs": 8000,
+    "minInterruptionWords": 3,
+    "minInterruptionDurationMs": 600,
+    "aecWarmupMs": 500,
+    "welcomeInterruptible": false,
+    "dnd": {
+      "startHourIST": 20,
+      "endHourIST": 10
+    }
+  }
+}
