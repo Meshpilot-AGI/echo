@@ -14,14 +14,23 @@ via markScheduledCallOutcome — so the scheduler's stuck-sweep stops re-dialing
 a customer who already decided. The call then ends gracefully.
 """
 import os
+import re
 import asyncio
 import aiohttp
+from datetime import datetime, timezone
 from loguru import logger
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import TTSSpeakFrame, EndTaskFrame
+from pipecat.frames.frames import (
+    TTSSpeakFrame,
+    EndTaskFrame,
+    TranscriptionFrame,
+    LLMContextAssistantTurnFrame,
+    BotStoppedSpeakingFrame,
+)
+from pipecat.observers.base_observer import BaseObserver, FramePushed
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -58,9 +67,60 @@ TTS_MODEL = os.getenv("PIPECAT_ELEVENLABS_MODEL", "eleven_multilingual_v2")
 # cod-confirm tool webhook (same box). The livekit tool router takes a flat body
 # and does Shopify tag + markScheduledCallOutcome.
 COD_CONFIRM_BASE = os.getenv("COD_CONFIRM_TOOL_URL", "http://127.0.0.1:3104")
-TOOL_SECRET = os.getenv("LIVEKIT_TOOL_SECRET", "")
+TOOL_SECRET = os.getenv("COD_TOOL_SECRET") or os.getenv("LIVEKIT_TOOL_SECRET", "")
 
 TERMINAL_TOOLS = ("confirm_order", "cancel_order", "request_human_agent", "request_callback")
+
+# ── parity: safety/parity config (from livekit-agent.js) ────────────────────
+# Same env var names + defaults as apps/cod_confirm/src/livekit-agent.js so
+# both voice paths tune identically. All values are seconds here (bot.py) vs
+# milliseconds in the JS source — converted at read time.
+MAX_CALL_MS = int(os.getenv("MAX_CALL_MS", "150000"))
+NO_INPUT_NUDGE_MS = int(os.getenv("NO_INPUT_NUDGE_MS", "7000"))
+NO_INPUT_HANGUP_MS = int(os.getenv("NO_INPUT_HANGUP_MS", "20000"))
+MAX_CONFUSION_TURNS = int(os.getenv("MAX_CONFUSION_TURNS", "2"))
+CONFUSION_CLOSE_DELAY_S = float(os.getenv("CONFUSION_CLOSE_DELAY_S", "7"))
+
+# Transcript-persistence webhook (Node cod-confirm server, same box). Reuses
+# COD_CONFIRM_TOOL_URL's host:port — /webhook/livekit/turn is mounted on the
+# same Express app as the /webhook/livekit/tool/* routes used by _post_tool
+# below, both gated by the same X-COD-Tool-Secret (requireToolAuth in
+# src/lib/tool-auth.js reads COD_TOOL_SECRET || LIVEKIT_TOOL_SECRET).
+TURN_WEBHOOK_URL = os.getenv("COD_CONFIRM_TURN_URL") or f"{COD_CONFIRM_BASE}/webhook/livekit/turn"
+
+# parity: voicemail detection patterns (from livekit-agent.js VOICEMAIL_PATTERNS,
+# verbatim). Broad partial match anywhere in any of the first 4 user
+# transcripts triggers an immediate hangup. Devanagari patterns catch Sarvam/
+# hi-IN STT transliterating an English voicemail greeting; the plain patterns
+# catch an English greeting transcribed as-is.
+VOICEMAIL_PATTERNS = [re.compile(p, flags) for p, flags in [
+    (r"व[ोॉ]इस[\s\-]*मे", 0),
+    (r"फ[ॉो]रवर्डेड\s+टू", 0),
+    (r"न[ॉो]ट\s+अव[ेै]लेबल", 0),
+    (r"रिक[ॉो]र्ड\s+य[ोौ]र\s+म[ैे]सेज", 0),
+    (r"लीव\s+अ\s+म[ैे]सेज", 0),
+    (r"एट\s+द\s+ट[ोौ]न", 0),
+    (r"आफ्टर\s+द\s+बीप", 0),
+    (r"व्हेन\s+य[ोौ]\s+ह[ैै]व\s+फिनिश्ड", 0),
+    (r"इस\s+समय\s+उपलब्ध\s+नहीं", 0),
+    (r"कृपया\s+संदेश\s+छोड़", 0),
+    (r"voicemail|voice\s*mail", re.IGNORECASE),
+    (r"answering\s*machine", re.IGNORECASE),
+    (r"please\s+(record|leave)\s+(your\s+)?(message|name)", re.IGNORECASE),
+    (r"(after|at)\s+the\s+(tone|beep)", re.IGNORECASE),
+]]
+
+# parity: anti-loop "confusion" closer regex (from livekit-agent.js
+# CONFUSION_RE, verbatim). NOTE: bot.py's system prompt asks the LLM for
+# romanized Hinglish, not Devanagari, so the Devanagari half of this pattern
+# is unlikely to ever match here — kept verbatim for parity/discoverability;
+# see the final report for this caveat.
+CONFUSION_RE = re.compile(
+    r"समझ नहीं आ|समझ नहीं पा|समझ नहीं|सुनाई नहीं|दोबारा बोल|फिर से बोल|माफ़? कीज|"
+    r"didn'?t (catch|hear|understand)|could ?n'?t (catch|hear|understand)|come again|"
+    r"could you repeat|say that again",
+    re.IGNORECASE,
+)
 
 
 def _fmt_amount(v):
@@ -123,6 +183,270 @@ def _build_tools() -> ToolsSchema:
     ])
 
 
+class CallGuards:
+    """parity: engine-level call-safety state (from livekit-agent.js's per-session
+    guards: armInitialSilenceGuard/armSilenceTimer/armMaxCallTimer, the
+    VOICEMAIL_PATTERNS check, the anti-loop confusion closer, and postTurn).
+
+    Pipecat has no single "session" object like LiveKit's voice.AgentSession —
+    this class is the Pipecat-side equivalent: it owns the timers/counters and
+    is driven by a CallSafetyObserver watching frames flow through the
+    pipeline (TranscriptionFrame = a final user turn, LLMContextAssistantTurnFrame
+    = a completed assistant turn), plus explicit calls from the terminal-tool
+    handlers below.
+    """
+
+    def __init__(self, ctx: dict):
+        self.ctx = ctx
+        self.room_name = str(ctx.get("_call_uuid") or ctx.get("_call_id") or "unknown-call")
+        self.sip_call_id = ctx.get("_call_id")
+        self._task: PipelineTask | None = None
+
+        self._turn_index = 0
+        self._terminal_fired = False
+        self._voicemail_detected = False
+        self._user_turn_count = 0
+        self._saw_user_speech = False
+        self._nudged = False
+        self._giving_up = False
+        self._consecutive_confusion = 0
+        self._greeting_played = False
+
+        self._nudge_task: asyncio.Task | None = None
+        self._silence_task: asyncio.Task | None = None
+        self._max_call_task: asyncio.Task | None = None
+
+    def attach_task(self, task: PipelineTask):
+        self._task = task
+
+    # ── transcript persistence (parity: postTurn from livekit-agent.js) ─────
+    async def post_turn(self, *, role: str, text: str, tool_name: str | None = None,
+                         tool_args: dict | None = None, tool_result: str | None = None,
+                         stt_confidence: float | None = None):
+        shop = self.ctx.get("shop")
+        shopify_order_id = self.ctx.get("entity_ref")
+        if not shop or not shopify_order_id:
+            # sandbox / demo call without entity context — skip persistence,
+            # same guard as turnPersistKey() returning falsy in the JS source.
+            return
+        turn_index = self._turn_index
+        self._turn_index += 1
+        payload = {
+            "shop": shop,
+            "shopify_order_id": str(shopify_order_id),
+            "room_name": self.room_name,
+            "sip_call_id": self.sip_call_id,
+            "turn_index": turn_index,
+            "role": role,
+            "text": text or "",
+            "lang": self.ctx.get("lang") or STT_LANG,
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "tool_result": tool_result,
+            "stt_confidence": stt_confidence,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    TURN_WEBHOOK_URL, json=payload,
+                    headers={"X-COD-Tool-Secret": TOOL_SECRET},
+                ) as r:
+                    if r.status >= 300:
+                        txt = await r.text()
+                        logger.warning(f"[turn-persist] HTTP {r.status} for {role} turn #{turn_index}: {txt[:200]}")
+        except Exception as e:
+            # Fire-and-forget: a webhook outage must never affect the call.
+            logger.warning(f"[turn-persist] fire-and-forget error on {role} turn #{turn_index}: {e}")
+
+    # ── silence / dead-air guards (parity: armInitialSilenceGuard / armSilenceTimer
+    #    / armMaxCallTimer) ───────────────────────────────────────────────────
+    def arm_initial_guards(self):
+        """Call once, right after the welcome finishes playing."""
+        if self._terminal_fired:
+            return
+        self._nudge_task = asyncio.create_task(self._nudge_then_arm_silence())
+        self._max_call_task = asyncio.create_task(self._max_call_backstop())
+
+    async def _nudge_then_arm_silence(self):
+        try:
+            await asyncio.sleep(NO_INPUT_NUDGE_MS / 1000)
+        except asyncio.CancelledError:
+            return
+        if self._terminal_fired or self._saw_user_speech:
+            return
+        self._nudged = True
+        lang = (self.ctx.get("lang") or STT_LANG or "hi")
+        nudge_text = ("Hello, are you able to hear me?" if str(lang).startswith("en")
+                      else "Hello, kya aap mujhe sun pa rahe hain?")
+        logger.info(f"[silence] parity: no reply {NO_INPUT_NUDGE_MS}ms after welcome — nudging customer")
+        try:
+            await self._task.queue_frame(TTSSpeakFrame(nudge_text))
+        except Exception as e:
+            logger.warning(f"[silence] nudge speak failed (non-fatal): {e}")
+        self._arm_silence_timer()
+
+    def _arm_silence_timer(self):
+        """(Re)arm the rolling no-input/idle timer. Called once after the
+        welcome and again on every final user turn."""
+        if self._terminal_fired:
+            return
+        if self._silence_task and not self._silence_task.done():
+            self._silence_task.cancel()
+        self._silence_task = asyncio.create_task(self._silence_timeout())
+
+    async def _silence_timeout(self):
+        try:
+            await asyncio.sleep(NO_INPUT_HANGUP_MS / 1000)
+        except asyncio.CancelledError:
+            return
+        if self._terminal_fired:
+            return
+        reason = (f"user idle {NO_INPUT_HANGUP_MS}ms — silence hangup" if self._saw_user_speech
+                  else f"no user speech {NO_INPUT_HANGUP_MS}ms — voicemail/dead-air hangup")
+        await self._hangup_now(reason)
+
+    async def _max_call_backstop(self):
+        try:
+            await asyncio.sleep(MAX_CALL_MS / 1000)
+        except asyncio.CancelledError:
+            return
+        if self._terminal_fired:
+            return
+        await self._hangup_now(f"max call duration {MAX_CALL_MS}ms — backstop hangup")
+
+    def _cancel_timers(self):
+        for t in (self._nudge_task, self._silence_task, self._max_call_task):
+            if t and not t.done():
+                t.cancel()
+
+    async def _hangup_now(self, reason: str):
+        logger.warning(f"[hangup] parity: {reason}")
+        self._cancel_timers()
+        if not self._task:
+            return
+        try:
+            await self._task.cancel(reason=reason)
+        except Exception as e:
+            logger.warning(f"[hangup] task.cancel failed (non-fatal): {e}")
+
+    def mark_terminal(self):
+        """Called by the terminal-tool handlers below (confirm/cancel/human/
+        callback). A terminal tool owns the post-farewell hangup
+        (_end_call_after_closing); disarm our guards so they don't race it."""
+        self._terminal_fired = True
+        self._cancel_timers()
+
+    def on_bot_stopped_speaking(self):
+        """First BotStoppedSpeakingFrame == the welcome finished playing.
+        Approximates livekit-agent.js's welcomeHandle.waitForPlayout()."""
+        if self._greeting_played:
+            return
+        self._greeting_played = True
+        self.arm_initial_guards()
+
+    # ── frame handlers (called by CallSafetyObserver) ───────────────────────
+    async def on_user_transcript(self, text: str):
+        if self._terminal_fired:
+            return
+        self._user_turn_count += 1
+        self._saw_user_speech = True
+        if self._nudge_task and not self._nudge_task.done():
+            self._nudge_task.cancel()
+        self._arm_silence_timer()
+
+        if not self._voicemail_detected and self._user_turn_count <= 4:
+            for pattern in VOICEMAIL_PATTERNS:
+                if pattern.search(text):
+                    self._voicemail_detected = True
+                    logger.warning(
+                        f"[voicemail] parity: detected on user turn #{self._user_turn_count}: "
+                        f"{text!r} (matched {pattern.pattern!r})"
+                    )
+                    asyncio.create_task(self.post_turn(
+                        role="tool", text="voicemail_detected", tool_name="voicemail_detected",
+                        tool_args={"transcript": text}, tool_result="hangup",
+                    ))
+                    await self._hangup_now("voicemail detected")
+                    return
+
+        asyncio.create_task(self.post_turn(role="user", text=text))
+
+    async def on_assistant_turn(self, text: str):
+        asyncio.create_task(self.post_turn(role="assistant", text=text))
+
+        if self._terminal_fired or self._giving_up:
+            return
+        if CONFUSION_RE.search(text or ""):
+            self._consecutive_confusion += 1
+            if self._consecutive_confusion >= MAX_CONFUSION_TURNS:
+                self._giving_up = True
+                self._cancel_timers()
+                lang = (self.ctx.get("lang") or STT_LANG or "hi")
+                close_text = (
+                    "Sorry, I am not able to hear you clearly. We will call you again shortly. Thank you."
+                    if str(lang).startswith("en") else
+                    "Maaf kijiye, aapki awaaz saaf nahi aa rahi hai. Hum aapko thodi der mein dobara call karenge. Dhanyawaad."
+                )
+                logger.warning(
+                    f"[anti-loop] parity: {self._consecutive_confusion} consecutive unclear "
+                    "replies — closing gracefully"
+                )
+                asyncio.create_task(self._close_for_confusion(close_text))
+        else:
+            self._consecutive_confusion = 0
+
+    async def _close_for_confusion(self, close_text: str):
+        if self._task:
+            try:
+                await self._task.queue_frame(TTSSpeakFrame(close_text))
+            except Exception as e:
+                logger.warning(f"[anti-loop] close speak failed (non-fatal): {e}")
+        try:
+            await asyncio.sleep(CONFUSION_CLOSE_DELAY_S)
+        except asyncio.CancelledError:
+            return
+        await self._hangup_now("anti-loop: repeated unintelligible input")
+
+
+class CallSafetyObserver(BaseObserver):
+    """parity: non-intrusive pipeline observer feeding CallGuards.
+
+    Watches frames flow through the pipeline (without being inserted as a
+    pipeline element — see pipecat.observers.base_observer.BaseObserver)
+    for TranscriptionFrame (final user turns, mirrors LiveKit's
+    UserInputTranscribed with ev.isFinal) and LLMContextAssistantTurnFrame
+    (a completed assistant turn's full text, mirrors LiveKit's
+    ConversationItemAdded for role=assistant). Frame instances are pushed
+    once per pipeline hop, so a single logical turn can be observed more than
+    once as it travels between processors — dedupe on frame.id, same pattern
+    pipecat.pipeline.worker.IdleFrameObserver uses internally.
+    """
+
+    def __init__(self, guard: CallGuards):
+        super().__init__()
+        self._guard = guard
+        self._seen_ids: set[int] = set()
+
+    async def on_push_frame(self, data: FramePushed):
+        frame = data.frame
+        if frame.id in self._seen_ids:
+            return
+        self._seen_ids.add(frame.id)
+        # Bound memory on very long calls; the id space is monotonic per
+        # process so dropping old ids once we're far past them is safe.
+        if len(self._seen_ids) > 4000:
+            self._seen_ids.clear()
+            self._seen_ids.add(frame.id)
+
+        if isinstance(frame, TranscriptionFrame):
+            await self._guard.on_user_transcript(frame.text or "")
+        elif isinstance(frame, LLMContextAssistantTurnFrame):
+            await self._guard.on_assistant_turn(frame.text or "")
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._guard.on_bot_stopped_speaking()
+
+
 async def run_bot(transport: BaseTransport, handle_sigint: bool, ctx: dict | None = None):
     ctx = ctx or {}
 
@@ -164,6 +488,11 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, ctx: dict | Non
         context_aggregator.assistant(),
     ])
 
+    # parity: safety/parity guards (max-call backstop, silence nudge + rolling
+    # idle timer, voicemail detection, anti-loop confusion closer, transcript
+    # persistence) — see CallGuards / CallSafetyObserver above.
+    guard = CallGuards(ctx)
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -172,7 +501,9 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, ctx: dict | Non
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[CallSafetyObserver(guard)],
     )
+    guard.attach_task(task)
 
     # ── Terminal tools: POST the cod-confirm tool webhook (Shopify tag +
     #    markScheduledCallOutcome), then wind the call down.
@@ -213,6 +544,16 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, ctx: dict | Non
             extra = {k: args.get(k) for k in ("note", "reason", "when")}
             ok, detail = await _post_tool(tool_name, extra)
             await params.result_callback({"ok": ok, "detail": detail})
+            # parity: transcript persistence (from livekit-agent.js postTurn,
+            # FunctionToolsExecuted handler) — capture the tool call itself.
+            asyncio.create_task(guard.post_turn(
+                role="tool", text=tool_name, tool_name=tool_name,
+                tool_args=extra, tool_result=detail,
+            ))
+            # A terminal tool owns the post-farewell hangup below — disarm the
+            # silence/max-call guards so they don't race it (parity:
+            # terminalToolFired in livekit-agent.js).
+            guard.mark_terminal()
             asyncio.create_task(_end_call_after_closing())
         return handler
 
@@ -230,11 +571,20 @@ async def run_bot(transport: BaseTransport, handle_sigint: bool, ctx: dict | Non
     @transport.event_handler("on_client_connected")
     async def _on_connected(transport, client):
         logger.info("cod-pipecat: client connected -> speaking greeting")
+        # The greeting is injected directly as a TTSSpeakFrame (bypasses the
+        # LLM context aggregator), so it never produces a
+        # LLMContextAssistantTurnFrame for CallSafetyObserver to see —
+        # persist it explicitly. Guard timers (nudge/silence/max-call) are
+        # armed separately, on the first BotStoppedSpeakingFrame (see
+        # CallGuards.on_bot_stopped_speaking), i.e. once the greeting finishes
+        # playing — parity with livekit-agent.js's welcomeHandle.waitForPlayout().
+        asyncio.create_task(guard.post_turn(role="assistant", text=greeting))
         await task.queue_frame(TTSSpeakFrame(greeting))
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(transport, client):
         logger.info("cod-pipecat: client disconnected")
+        guard.mark_terminal()
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=handle_sigint)

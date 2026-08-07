@@ -145,6 +145,14 @@ async def vobiz_ws(websocket: WebSocket, body: str = Query(None), call_uuid: str
     logger.info(f"[ws] vobiz start call_id={parsed['call_id']} stream_id={parsed['stream_id']} "
                 f"fmt=({parsed['encoding']},{parsed['sample_rate']})")
 
+    # parity: give bot.py's CallGuards a call/room identifier to persist
+    # transcripts against (server.js's /webhook/livekit/turn requires
+    # room_name as a string). Vobiz has no LiveKit-style "room" — the call_uuid
+    # from /start (or, failing that, the call_id Vobiz reports on the media
+    # stream) is the closest stable per-call identifier.
+    ctx["_call_uuid"] = call_uuid
+    ctx["_call_id"] = parsed.get("call_id") or call_uuid
+
     serializer = VobizFrameSerializer(
         stream_id=parsed["stream_id"],
         call_id=parsed["call_id"],
