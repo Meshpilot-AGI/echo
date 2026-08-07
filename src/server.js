@@ -3,8 +3,6 @@
  *
  * Engine-level endpoints (profile-agnostic):
  *   GET  /health
- *   POST /webhook/livekit/room-event          — LiveKit lifecycle events
- *   POST /webhook/livekit/egress-ready        — recording egress → CallAttempt.audioUri
  *   POST /webhook/livekit/turn                — per-utterance transcript capture
  *   POST /webhook/vobiz/call-event            — SIP-level disposition visibility
  *
@@ -15,7 +13,7 @@
  *   GET  /flow-test-livekit                   — dev: trigger a real call by order name
  *
  * Queue: Postgres (ScheduledCall model). In-process scheduler in
- * src/lib/scheduler.js polls every 30s and dispatches via triggerLivekitCall.
+ * src/lib/scheduler.js polls every 30s and dispatches via triggerPipecatCall.
  *
  * Profile loading is hard-coded to cod-confirm for now; phase 2 introduces
  * the registry that auto-discovers profiles/<id>/profile.json at boot.
@@ -24,9 +22,6 @@
 import express from 'express';
 import crypto from 'node:crypto';
 import pkg from '@prisma/client';
-import { WebhookReceiver } from 'livekit-server-sdk';
-import { triggerLivekitCall } from './trigger-livekit-call.js';
-import { buildRelayTwiml } from './trigger-relay-call.js';
 import { normalizePhone } from './lib/phone.js';
 import { computeScheduledAt, isDnd, adjustForDnd } from './lib/dnd.js';
 import { isShopAllowed, ALLOWED_SHOPS, ALLOWLIST_ACTIVE, getShopBranding, getLocalBrandingSnapshot, getStoreCallWindow } from './lib/shops.js';
@@ -36,7 +31,6 @@ import { startScheduler, markScheduledCallOutcome, DISPATCH_MODE, COD_CONFIRM_RU
 import { getProfile, listProfiles, getRegistry } from './lib/profiles.js';
 import { createToolAuth } from './lib/tool-auth.js';
 import { processVobizRecording } from './lib/vobiz-recordings.js';
-import { processRetellRecording } from './lib/retell-recordings.js';
 import { pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
@@ -53,14 +47,6 @@ const prisma = new PrismaClient();
 const PORT = Number(process.env.PORT || 3104);
 const LIVEKIT_TOOL_SECRET = process.env.LIVEKIT_TOOL_SECRET || '';
 const CALL_DELAY_MS = Number(process.env.CALL_DELAY_MS ?? 10 * 60_000); // 10 min default
-
-// LiveKit Cloud signs webhook bodies with the project API secret. We verify
-// with WebhookReceiver using the SAME API key/secret the agent worker uses.
-const LIVEKIT_API_KEY    = process.env.LIVEKIT_API_KEY    || '';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || '';
-const livekitWebhookReceiver = (LIVEKIT_API_KEY && LIVEKIT_API_SECRET)
-  ? new WebhookReceiver(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-  : null;
 
 // Reject counters surfaced on /health. Mutated by profile-owned middleware too.
 const rejectCount = { hmac_missing: 0, hmac_mismatch: 0, shop_blocked: 0, tool_auth_missing: 0, tool_auth_mismatch: 0 };
@@ -83,7 +69,6 @@ const sharedDeps = {
   isShopAllowed,
   normalizePhone,
   getShopBranding,
-  triggerLivekitCall,
   markScheduledCallOutcome,
   requireToolAuth,
 };
@@ -194,35 +179,6 @@ app.get('/profiles', (_req, res) => {
 //
 // Auth: shared LIVEKIT_TOOL_SECRET via X-COD-Tool-Secret. The endpoint
 // initiates real PSTN calls, so it fails closed.
-// Inbound voice: Twilio hits this when someone DIALS the concierge number.
-// Returns the same ConversationRelay TwiML as an outbound call so the caller
-// reaches the live agent instead of dead air. Public URL (via nginx):
-//   https://shopify.meshpilot.app/cod-confirm/voice/incoming
-// Configured as the number's "A call comes in" webhook. No tool-secret here —
-// Twilio can't send it; the endpoint only ever returns static TwiML that
-// connects to our relay, so there is nothing sensitive to leak.
-app.all('/voice/incoming', (req, res) => {
-  try {
-    const twiml = buildRelayTwiml({
-      payload: {
-        agent_name: process.env.CONCIERGE_AGENT_NAME || 'Alex',
-        brand_name: process.env.INBOUND_BRAND_NAME || 'Mesh Pilot',
-        opening_line: process.env.INBOUND_GREETING
-          || `Hi, thanks for calling Mesh Pilot. This is ${process.env.CONCIERGE_AGENT_NAME || 'Alex'}, the AI voice assistant. How can I help you today?`,
-        goal: 'greet the inbound caller warmly and help with whatever they ask; this may be a live product demo',
-        context: 'Inbound caller dialed the Mesh Pilot voice concierge number directly.',
-      },
-      identity: { shop: '_concierge_inbound' },
-    });
-    res.type('text/xml').send(twiml);
-  } catch (err) {
-    console.error('[voice/incoming] failed to build TwiML:', err.message);
-    res.type('text/xml').status(200).send(
-      '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, our assistant is unavailable right now. Please try again shortly.</Say></Response>'
-    );
-  }
-});
-
 app.post('/calls/dispatch', requireToolAuth, async (req, res) => {
   const b = req.body || {};
   const profileId = b.profile;
@@ -347,98 +303,6 @@ app.post('/webhook/livekit/turn', requireToolAuth, async (req, res) => {
   }
 });
 
-// LiveKit Cloud webhook — egress + room/participant events. LiveKit signs
-// the body with the project API secret; manual-replay path falls back to
-// the shared tool secret.
-app.post('/webhook/livekit/egress-ready', async (req, res) => {
-  try {
-    let event = null;
-
-    const authHeader = req.get('Authorization') || '';
-    if (authHeader && livekitWebhookReceiver) {
-      if (!req.rawBody) {
-        return res.status(400).json({ ok: false, error: 'raw body required for LiveKit signature verification' });
-      }
-      try {
-        event = await livekitWebhookReceiver.receive(req.rawBody.toString('utf8'), authHeader);
-      } catch (err) {
-        console.warn('[livekit-webhook] signature verification failed:', err.message);
-        return res.status(401).json({ ok: false, error: 'invalid LiveKit webhook signature' });
-      }
-    } else if (req.get('X-COD-Tool-Secret')) {
-      const got = req.get('X-COD-Tool-Secret');
-      if (!LIVEKIT_TOOL_SECRET) {
-        return res.status(503).json({ ok: false, error: 'tool auth not configured' });
-      }
-      const a = Buffer.from(got);
-      const b = Buffer.from(LIVEKIT_TOOL_SECRET);
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        return res.status(401).json({ ok: false, error: 'invalid X-COD-Tool-Secret' });
-      }
-      event = req.body; // trust the payload shape from a manual replay
-    } else {
-      return res.status(401).json({ ok: false, error: 'missing Authorization or X-COD-Tool-Secret' });
-    }
-
-    const eventType = event?.event || '(unknown)';
-    console.log(`[livekit-webhook] event=${eventType} id=${event?.id || '-'}`);
-
-    if (eventType !== 'egress_ended') {
-      return res.json({ ok: true, event: eventType, ignored: true });
-    }
-
-    const eg = event.egressInfo || event.egress_info || {};
-    const roomName = eg.roomName || eg.room_name;
-    const file = (eg.fileResults && eg.fileResults[0]) || (eg.file_results && eg.file_results[0]) || null;
-    if (!roomName) {
-      return res.status(400).json({ ok: false, error: 'egressInfo.roomName missing' });
-    }
-    // SEC-aikido-prisma-operator-injection (2026-07-27): same class as
-    // /webhook/livekit/turn — a non-string roomName reaches the updateMany
-    // where-clause as a Prisma filter operator and would stamp audioUri onto
-    // every row. This is the BUG-9 failure mode noted below, reachable from
-    // the request body rather than from a missing filter.
-    if (typeof roomName !== 'string') {
-      return res.status(400).json({ ok: false, error: 'egressInfo.roomName must be a string' });
-    }
-
-    let durationMs = null;
-    if (file?.duration) {
-      const ns = typeof file.duration === 'bigint' ? Number(file.duration) : Number(file.duration);
-      if (Number.isFinite(ns)) durationMs = Math.round(ns / 1_000_000);
-    }
-
-    let audioFormat = null;
-    const filename = file?.filename || '';
-    const m = /\.([a-zA-Z0-9]+)$/.exec(filename);
-    if (m) audioFormat = m[1].toLowerCase();
-
-    const audioUri = file?.location || filename || null;
-
-    const updated = await prisma.callAttempt.updateMany({
-      where: { roomName },
-      data: {
-        audioUri,
-        audioFormat,
-        audioDurationMs: durationMs,
-        consentGiven:    (process.env.RECORDING_CONSENT_DISCLOSURE || 'on').toLowerCase() !== 'off',
-      },
-    });
-    console.log(`[livekit-egress] room=${roomName} uri=${audioUri} dur=${durationMs}ms rows=${updated.count}`);
-    res.json({ ok: true, event: eventType, rows_updated: updated.count });
-  } catch (err) {
-    console.error('[livekit-webhook] error:', err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// LiveKit room-event webhook (optional — safety net for visibility)
-app.post('/webhook/livekit/room-event', (req, res) => {
-  const ev = req.body || {};
-  console.log('[livekit-event]', ev.event, 'room:', ev.room?.name);
-  res.json({ ok: true });
-});
-
 // Vobiz SIP-level events + recording completion.
 // We store the CallUUID on call-start so we can match recordings later,
 // and process recording.completed to download → R2 immediately.
@@ -520,128 +384,6 @@ app.post('/webhook/vobiz/call-event', async (req, res) => {
 
   res.json({ ok: true });
 });
-
-// Retell AI lifecycle webhook: call_started, call_ended, call_analyzed, etc.
-// We use this to:
-//   1. Stamp CallAttempt.startedAt / endedAt / disposition / duration_ms.
-//   2. Trigger async recording fetch → R2 upload when recording_url is present.
-//
-// Auth: Retell signs each webhook with the `x-retell-signature` header in the
-// form `v={unixMillis},d={hexDigest}`, where digest = HMAC-SHA256(rawBody +
-// timestamp, key) keyed by the Retell API key (the one bearing the "webhook"
-// badge). We must use the RAW body (never re-serialized JSON) and reject stale
-// timestamps (>5 min) to block replay. This matches Retell's documented manual
-// verification (the current retell-sdk dropped its verify() helper).
-// Ref: https://docs.retellai.com/features/secure-webhook
-//   RETELL_WEBHOOK_VERIFY=off  (default) — skip the check
-//                        =log         — verify + warn, still process
-//                        =enforce     — verify + reject (401) on mismatch
-// The key defaults to RETELL_API_KEY; override with RETELL_WEBHOOK_KEY if the
-// webhook-badged key differs from the API-call key.
-const RETELL_WEBHOOK_VERIFY = (process.env.RETELL_WEBHOOK_VERIFY || 'off').toLowerCase();
-const RETELL_WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
-function verifyRetellSignature(req) {
-  const key = process.env.RETELL_WEBHOOK_KEY || process.env.RETELL_API_KEY || '';
-  const header = req.get('x-retell-signature') || '';
-  if (!key || !req.rawBody) return { ok: false, reason: 'no_key_or_rawbody' };
-  if (!header) return { ok: false, reason: 'no_signature' };
-  const m = header.match(/v=(\d+),d=(.+)/);
-  if (!m) return { ok: false, reason: 'bad_header_format' };
-  const timestamp = m[1];
-  const digest = m[2];
-  if (Math.abs(Date.now() - Number(timestamp)) > RETELL_WEBHOOK_MAX_SKEW_MS) {
-    return { ok: false, reason: 'stale_timestamp' };
-  }
-  const expected = crypto.createHmac('sha256', key)
-    .update(req.rawBody)            // raw bytes, exactly as received
-    .update(timestamp)             // concatenated with the timestamp string
-    .digest('hex');
-  const a = Buffer.from(expected);
-  const b = Buffer.from(digest);
-  const ok = a.length === b.length && crypto.timingSafeEqual(a, b);
-  return { ok, reason: ok ? 'ok' : 'mismatch' };
-}
-
-// Dedup: call_ended AND call_analyzed both carry recording_url and would each
-// trigger a download+upload of the same MP3. Process a given call_id's
-// recording exactly once (in-memory; resets on restart — fine, recordings are
-// short-lived events). On failure we drop the id so a later event can retry.
-const retellRecordingsProcessed = new Set();
-
-app.post('/webhook/retell/call-event', async (req, res) => {
-  const ev = req.body || {};
-  const eventType = String(ev.event || ev.type || '').toLowerCase();
-  const callId = ev.call?.call_id || ev.call_id || '';
-  const metadata = ev.call?.metadata || ev.metadata || {};
-  const shop = metadata.shop || '';
-  const orderId = metadata.order_id || '';
-
-  if (RETELL_WEBHOOK_VERIFY !== 'off') {
-    const verdict = verifyRetellSignature(req);
-    if (!verdict.ok) {
-      if (RETELL_WEBHOOK_VERIFY === 'enforce') {
-        console.warn(`[retell-event] REJECTED — signature ${verdict.reason}`);
-        return res.status(401).json({ ok: false, error: 'invalid retell signature' });
-      }
-      console.warn(`[retell-event] signature ${verdict.reason} (log-only; set RETELL_WEBHOOK_VERIFY=enforce to reject)`);
-    } else {
-      console.log('[retell-event] signature OK');
-    }
-  }
-
-  console.log('[retell-event]', eventType, 'call:', callId, 'shop:', shop || '-', 'order:', orderId || '-', JSON.stringify(ev).slice(0, 600));
-
-  try {
-    if (eventType === 'call_started' && callId) {
-      await prisma.callAttempt.updateMany({
-        where: { roomName: callId },
-        data: { startedAt: new Date() },
-      });
-    }
-
-    if ((eventType === 'call_ended' || eventType === 'call_analyzed') && callId) {
-      const durationMs = ev.call?.duration_ms ?? ev.duration_ms ?? null;
-      const disposition = mapRetellDisposition(ev.call?.disconnection_reason || ev.disconnection_reason || ev.call?.call_status || ev.call_status);
-
-      // Update the latest CallAttempt for this call with duration + endedAt.
-      const latest = await prisma.callAttempt.findFirst({
-        where: { roomName: callId },
-        orderBy: { createdAt: 'desc' },
-      });
-      if (latest) {
-        const updateData = { endedAt: new Date() };
-        if (durationMs != null) updateData.audioDurationMs = durationMs;
-        if (disposition && !latest.disposition) updateData.disposition = disposition;
-        await prisma.callAttempt.update({ where: { id: latest.id }, data: updateData });
-      }
-
-      // If a recording URL is present, fetch + upload to R2 asynchronously —
-      // exactly once per call (call_ended + call_analyzed both fire with it).
-      const recordingUrl = ev.call?.recording_url || ev.recording_url;
-      if (recordingUrl && callId && !retellRecordingsProcessed.has(callId)) {
-        retellRecordingsProcessed.add(callId);
-        processRetellRecording({ call_id: callId, recording_url: recordingUrl, shop, orderId, prisma })
-          .then(r => console.log('[retell-event] recording processed:', r))
-          .catch(e => { retellRecordingsProcessed.delete(callId); console.error('[retell-event] recording processing failed:', e.message); });
-      }
-    }
-  } catch (err) {
-    console.error('[retell-event] handler error:', err.message);
-  }
-
-  res.json({ ok: true });
-});
-
-function mapRetellDisposition(reason) {
-  if (!reason) return null;
-  const r = String(reason).toLowerCase();
-  if (r.includes('busy')) return 'busy';
-  if (r.includes('no_answer') || r.includes('noanswer')) return 'no_answer';
-  if (r.includes('voicemail')) return 'voicemail';
-  if (r.includes('completed') || r.includes('normal_clearing')) return 'completed';
-  if (r.includes('failed')) return 'failed';
-  return null;
-}
 
 // ─── Startup ─────────────────────────────────────────────────────────
 // Cache of imported profile index modules — looked up by id when we need to

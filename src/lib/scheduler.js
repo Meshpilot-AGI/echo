@@ -24,9 +24,6 @@
  * request_callback — those handlers call markScheduledCallOutcome().
  */
 
-import { triggerLivekitCall } from '../trigger-livekit-call.js';
-import { triggerRelayCall } from '../trigger-relay-call.js';
-import { triggerRetellCall } from '../trigger-retell-call.js';
 import { triggerPipecatCall } from '../trigger-pipecat-call.js';
 import { getShopBranding, getStoreCallWindow } from './shops.js';
 import { adjustForDnd, isDnd } from './dnd.js';
@@ -61,8 +58,8 @@ const MAX_CONCURRENT_PER_STORE = Number(process.env.SCHEDULER_MAX_CONCURRENT_PER
  *
  * Default is livekit until Retell+Vobiz is validated in production.
  */
-export const COD_CONFIRM_RUNTIME = (process.env.COD_CONFIRM_RUNTIME || 'livekit').toLowerCase();
-const VALID_RUNTIMES = ['livekit', 'retell', 'pipecat'];
+export const COD_CONFIRM_RUNTIME = (process.env.COD_CONFIRM_RUNTIME || 'pipecat').toLowerCase();
+const VALID_RUNTIMES = ['pipecat'];
 if (!VALID_RUNTIMES.includes(COD_CONFIRM_RUNTIME)) {
   throw new Error(`Invalid COD_CONFIRM_RUNTIME: "${COD_CONFIRM_RUNTIME}". Must be one of: ${VALID_RUNTIMES.join(', ')}`);
 }
@@ -244,40 +241,17 @@ async function dispatchOne(prisma, row, onFinalFail) {
     const branding = row.shop ? getShopBranding(row.shop) : {};
     const identity = { shop: row.shop, entityRef: row.orderId, entityName: row.orderName };
 
-    if (isConcierge) {
-      // International (US/+1): place a Twilio ConversationRelay call. Twilio owns
-      // telephony + ASR + ElevenLabs TTS; our relay server runs the LLM brain.
-      placement = await triggerRelayCall({ phone: row.phone, payload, identity, branding: { name: branding.name } });
-    } else if (COD_CONFIRM_RUNTIME === 'retell') {
-      placement = await triggerRetellCall({
-        phone:    row.phone,
-        profile:  row.profile || 'cod-confirm',
-        payload:  payload,
-        identity,
-        branding: { name: branding.name, category: branding.category },
-      });
-    } else if (COD_CONFIRM_RUNTIME === 'pipecat') {
-      // Pipecat + Vobiz (Python bot on :3106). Replaces Retell for +91 COD.
-      placement = await triggerPipecatCall({
-        phone:    row.phone,
-        profile:  row.profile || 'cod-confirm',
-        payload:  payload,
-        identity,
-        branding: { name: branding.name, category: branding.category },
-      });
-    } else {
-      placement = await triggerLivekitCall({
-        phone:    row.phone,
-        lang:     row.lang,
-        profile:  row.profile || 'cod-confirm',
-        // Pass the profile's payload verbatim. Each key becomes one
-        // participant attribute the profile's renderContext reads. No
-        // more COD-specific camelCase translation.
-        payload:  payload,
-        identity,
-        branding: { name: branding.name, category: branding.category },
-      });
-    }
+    // SOLE runtime: Pipecat + Vobiz (self-hosted Python bot on :3106).
+    // LiveKit / Retell / Twilio-Relay runtimes removed 2026-08-06 (Echo E1.2a —
+    // no managed voice-vendor lock-in). International/concierge (+1) routing is a
+    // future re-add; today every call goes through the Pipecat/Vobiz path.
+    placement = await triggerPipecatCall({
+      phone:    row.phone,
+      profile:  row.profile || 'cod-confirm',
+      payload:  payload,
+      identity,
+      branding: { name: branding.name, category: branding.category },
+    });
   } catch (err) {
     console.error(`[scheduler] dispatch failed ${row.orderName}:`, err?.message || err);
     await handleFailure(prisma, row, err?.message || String(err), onFinalFail);

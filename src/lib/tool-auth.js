@@ -19,7 +19,7 @@
 import crypto from 'node:crypto';
 
 export function createToolAuth(env, rejectCount = {}) {
-  const SECRET = (env.LIVEKIT_TOOL_SECRET || '').trim();
+  const SECRET = (env.COD_TOOL_SECRET || env.LIVEKIT_TOOL_SECRET || '').trim();
 
   return function requireToolAuth(req, res, next) {
     if (!SECRET) {

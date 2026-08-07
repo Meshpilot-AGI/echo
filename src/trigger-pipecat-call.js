@@ -38,7 +38,7 @@ function cleanName(name) {
 }
 
 const PIPECAT_BASE = process.env.COD_PIPECAT_URL || 'http://127.0.0.1:3106';
-const TOOL_SECRET = process.env.LIVEKIT_TOOL_SECRET || '';
+const TOOL_SECRET = (process.env.COD_TOOL_SECRET || process.env.LIVEKIT_TOOL_SECRET) || '';
 const VOBIZ_FROM = process.env.VOBIZ_FROM_NUMBER || '';
 
 export async function triggerPipecatCall({ phone, profile = 'cod-confirm', payload = {}, identity = {}, branding = {} }) {

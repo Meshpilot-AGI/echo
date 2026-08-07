@@ -1,0 +1,16 @@
+[project]
+name = "cod-pipecat"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.14.1",
+    "fastapi>=0.139.0",
+    "loguru>=0.7.3",
+    "pipecat-ai[elevenlabs,openai,sarvam,silero,websockets]>=1.4.0",
+    "pipecat-vobiz>=0.0.3",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.32",
+    "uvicorn[standard]>=0.49.0",
+]
