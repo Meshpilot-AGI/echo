@@ -27,7 +27,6 @@
 import { triggerPipecatCall } from '../trigger-pipecat-call.js';
 import { getShopBranding, getStoreCallWindow } from './shops.js';
 import { adjustForDnd, isDnd } from './dnd.js';
-import { markHubVoiceCallOutcome } from './hub-voice-queue.js';
 
 // ── Tunables ──────────────────────────────────────────────────────────
 const TICK_MS            = Number(process.env.SCHEDULER_TICK_MS        ?? 30_000);
@@ -277,17 +276,6 @@ async function dispatchOne(prisma, row, onFinalFail) {
       where: { id: row.id },
       data:  { roomName, sipCallId, attempts: { increment: 1 } },
     });
-    // DASH-VOICE-1: hub mirror — flip the brand-attributed row to
-    // status='calling' and stamp the dialer_call_id (roomName) so a
-    // future cockpit drilldown can correlate back to LiveKit.
-    markHubVoiceCallOutcome({
-      shop: row.shop,
-      order_id: row.orderId,
-      status: 'dispatching',
-      dialer_call_id: roomName || sipCallId || null,
-    }).catch(err => console.warn(
-      `[scheduler] hub voice-queue dispatching mirror failed shop=${row.shop} order=${row.orderName} reason=${err?.message}`,
-    ));
     const runtimeLabel = isConcierge ? 'relay' : COD_CONFIRM_RUNTIME;
     console.log(`[scheduler] dispatched ${row.orderName} (${row.shop}) runtime=${runtimeLabel} attempt=${row.attempts + 1} room=${roomName}`);
   } catch (err) {
@@ -386,19 +374,6 @@ async function handleFailure(prisma, row, reason, onFinalFail) {
         lastError: reason,
       },
     });
-    // DASH-VOICE-1 (2026-05-26): mirror the FINAL FAIL terminal state
-    // into the hub voice queue. Echo's local row is now status=failed
-    // outcome=no_answer; reflect the same in core.voice_call_queue so
-    // brand dashboards see the dead row.
-    markHubVoiceCallOutcome({
-      shop: row.shop,
-      order_id: row.orderId,
-      status: 'failed',
-      outcome: 'no_answer',
-      dialer_call_id: row.roomName || row.sipCallId || null,
-    }).catch(err => console.warn(
-      `[scheduler] hub voice-queue final-fail mirror failed shop=${row.shop} order=${row.orderName} reason=${err?.message}`,
-    ));
     console.log(`[scheduler] FINAL FAIL ${row.orderName} after ${nextAttempts} attempts: ${reason}`);
     if (typeof onFinalFail === 'function') {
       try {
@@ -469,36 +444,7 @@ export async function markScheduledCallOutcome(prisma, { shop, orderId, outcome,
       where: { id: latestAttempt.id },
       data: { endedAt: new Date(), disposition: outcome, notes },
     });
-    // Brain mirror (GROW-BIND-4): notify sibling agents on the
-    // same brand that a COD-confirm call just terminated. Silent
-    // no-op when BSK-005 brain token isn't set for this shop.
-    // Fire-and-forget; brain failures are caught + console.warn'd
-    // and never roll back the CallAttempt row above.
-    const { scheduleCallCompletionMirror } = await import('./brain.js');
-    scheduleCallCompletionMirror({
-      brand: shop,
-      shop,
-      orderId,
-      orderName: latestAttempt.orderName,
-      disposition: outcome,
-      attemptId: latestAttempt.id,
-      notes,
-    });
   }
-
-  // DASH-VOICE-1 (2026-05-26): mirror the terminal outcome into the
-  // hub per-brand voice queue. Best-effort; logs and continues on
-  // failure. The brand_id is resolved via the canonical shop→brand_id
-  // cache populated at boot.
-  markHubVoiceCallOutcome({
-    shop,
-    order_id: orderId,
-    status: 'done',
-    outcome,
-    dialer_call_id: row.roomName || row.sipCallId || null,
-  }).catch(err => console.warn(
-    `[scheduler] hub voice-queue outcome mirror failed shop=${shop} order=${orderId} reason=${err?.message}`,
-  ));
 
   console.log(`[scheduler] outcome=${outcome} recorded for ${shop}/${orderId}`);
   return prisma.scheduledCall.findUnique({ where: { id: row.id } });

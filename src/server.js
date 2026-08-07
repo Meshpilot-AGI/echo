@@ -24,9 +24,7 @@ import crypto from 'node:crypto';
 import pkg from '@prisma/client';
 import { normalizePhone } from './lib/phone.js';
 import { computeScheduledAt, isDnd, adjustForDnd } from './lib/dnd.js';
-import { isShopAllowed, ALLOWED_SHOPS, ALLOWLIST_ACTIVE, getShopBranding, getLocalBrandingSnapshot, getStoreCallWindow } from './lib/shops.js';
-import { auditShopRegistryAgainstHub, auditShopBrandingAgainstHub, closeHubPool } from './lib/hub-context.js';
-import { closeHubVoiceQueuePool } from './lib/hub-voice-queue.js';
+import { isShopAllowed, ALLOWED_SHOPS, ALLOWLIST_ACTIVE, getShopBranding, getStoreCallWindow } from './lib/shops.js';
 import { startScheduler, markScheduledCallOutcome, DISPATCH_MODE, COD_CONFIRM_RUNTIME } from './lib/scheduler.js';
 import { getProfile, listProfiles, getRegistry } from './lib/profiles.js';
 import { createToolAuth } from './lib/tool-auth.js';
@@ -448,25 +446,6 @@ app.listen(PORT, '127.0.0.1', async () => {
   ]);
   console.log(`[glitch-voice] queue depth on startup: queued=${queued}, dispatching=${dispatching}`);
 
-  // Mesh Pilot shop-drift audit: for every locally-allowlisted shop,
-  // look up the canonical brand_id in `core.brand_aliases`
-  // (system='shopify_domain') and log status. Populates the hub
-  // canonical cache that `lib/shops.js::brandIdForShop` reads.
-  // Observation-only — never blocks boot.
-  try {
-    await auditShopRegistryAgainstHub(ALLOWED_SHOPS);
-    // Branding drift audit runs after the shop→brand_id audit so it
-    // can read the freshly-populated canonical-id + branding caches
-    // synchronously. Observation-only; never blocks boot.
-    try {
-      auditShopBrandingAgainstHub(getLocalBrandingSnapshot());
-    } catch (err) {
-      console.warn(`[hub-context] cod_confirm.branding_drift audit_failed reason=${err.message}`);
-    }
-  } catch (err) {
-    console.warn(`[hub-context] cod_confirm.brand_drift audit_failed reason=${err.message}`);
-  }
-
   startScheduler(prisma, { onFinalFail });
 });
 
@@ -474,7 +453,5 @@ app.listen(PORT, '127.0.0.1', async () => {
 process.on('SIGTERM', async () => {
   console.log('[glitch-voice] SIGTERM — shutting down');
   await prisma.$disconnect();
-  await closeHubPool();
-  await closeHubVoiceQueuePool();
   process.exit(0);
 });

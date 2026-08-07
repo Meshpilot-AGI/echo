@@ -90,42 +90,27 @@ const brandingMap = (() => {
   return {};
 })();
 
-import { canonicalBrandIdForShopSync, canonicalBrandingForShopSync } from './hub-context.js';
-
 /**
  * Resolve display branding for a shop.
  *
- * Lookup order (post Echo Phase 2, 2026-05-26):
- *   1. Hub-canonical name from `core.brands.display_name`, via
- *      `canonicalBrandingForShopSync()`. Populated by the startup
- *      audit. This is the source-of-truth path.
- *   2. Local override map (env `STORE_BRANDING` or built-in family
- *      JSON), kept so Echo still serves real names when the hub DB
- *      is unreachable or when an operator hasn't migrated branding
- *      to `core.brands` yet.
- *   3. Env defaults `STORE_NAME` / `STORE_CATEGORY` (legacy
+ * Lookup order (hub-detached, 2026-08-07):
+ *   1. Local override map (env `STORE_BRANDING` or built-in family
+ *      JSON).
+ *   2. Env defaults `STORE_NAME` / `STORE_CATEGORY` (legacy
  *      single-tenant fallback).
- *
- * `category` is NOT modeled in the hub today — `core.brands` has
- * `business_type` (`ecom_d2c`, `consulting`, …), which is a different
- * shape from Echo's freeform category string. Keep `category` on the
- * local-config path until a hub equivalent exists. The `branding_drift`
- * audit only watches `name`.
  */
 export function getShopBranding(shop) {
   const key = String(shop || '').trim().toLowerCase();
-  const hubHit = canonicalBrandingForShopSync(key);
   const localHit = brandingMap[key];
   return {
-    name:     hubHit?.display_name || localHit?.name     || process.env.STORE_NAME     || '',
-    category: localHit?.category   || process.env.STORE_CATEGORY || '',
+    name:     localHit?.name     || process.env.STORE_NAME     || '',
+    category: localHit?.category || process.env.STORE_CATEGORY || '',
   };
 }
 
 /**
- * Snapshot of the local branding map used by the boot-time
- * `branding_drift` audit. Returns `{shop_lowercase: {name, category}}`
- * — exactly the shape `auditShopBrandingAgainstHub` expects.
+ * Snapshot of the local branding map. Returns
+ * `{shop_lowercase: {name, category}}`.
  */
 export function getLocalBrandingSnapshot() {
   return { ...brandingMap };
@@ -134,23 +119,14 @@ export function getLocalBrandingSnapshot() {
 /**
  * Resolve a shop domain to its brand_id.
  *
- * Lookup order (post Echo shared-access, 2026-05-26):
- *   1. Hub-canonical cache from `lib/hub-context.js` (populated by
- *      the boot-time `auditShopRegistryAgainstHub` call). This is the
- *      source-of-truth path — `core.brand_aliases` is the canonical
- *      mapping per architecture docs.
- *   2. Built-in `config/urban-family.json` fallback. Kept so Echo
- *      still boots in a hub-detached environment (local dev without
- *      POSTGRES_BRAIN_URL) and so a transient brain-DB outage does
- *      not blackhole live calls.
+ * Lookup order (hub-detached, 2026-08-07):
+ *   1. Built-in `config/urban-family.json` local registry.
  *
- * Returns undefined when neither source knows the shop.
+ * Returns undefined when the shop is unknown locally.
  */
 export function brandIdForShop(shop) {
   if (!shop) return undefined;
   const key = String(shop).trim().toLowerCase();
-  const hubHit = canonicalBrandIdForShopSync(key);
-  if (hubHit) return hubHit;
   if (!familyConfig?.stores) return undefined;
   const hit = familyConfig.stores.find(
     s => String(s.domain).trim().toLowerCase() === key
