@@ -102,6 +102,10 @@ Operators are responsible for configuring retention policies and access controls
 
 ---
 
-## License & Proprietary Notice
+## License
 
-This repository is **proprietary — All Rights Reserved**. © Nuraveda (trading as Nuraveda Lab), solely owned by Tejas Karan Agrawal. Security research on your own lawfully-obtained instance is welcomed; unauthorized access to production systems is not. For licensing inquiries: help.nuraveda@gmail.com
+Echo is part of **Mesh Pilot** — the AI marketing-operations platform by **Nuraveda Labs**.
+
+Built for Indian e-commerce, shipping production AI voice agents that confirm COD orders, qualify leads, and handle support callbacks at scale.
+
+**Echo is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.**
